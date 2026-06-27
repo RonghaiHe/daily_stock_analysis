@@ -26,6 +26,7 @@ from enum import Enum
 from src.config import Config, get_config
 from src.enums import ReportType
 from src.market_phase_summary import format_public_market_status_line, format_public_phase_pack_excerpt
+from src.services.decision_signal_summary import format_decision_signal_excerpt
 from src.notification_routing import (
     get_notification_route_config,
     split_notification_route_channels,
@@ -343,6 +344,12 @@ class NotificationService(
             getattr(result, "market_phase_summary", None),
             getattr(result, "analysis_context_pack_overview", None),
             source=getattr(result, "analysis_visibility_source", None) or "evaluator_snapshot",
+            report_language=report_language,
+        )
+
+    def _decision_signal_excerpt(self, result: AnalysisResult, report_language: str) -> str:
+        return format_decision_signal_excerpt(
+            getattr(result, "decision_signal_summary", None),
             report_language=report_language,
         )
 
@@ -859,6 +866,9 @@ class NotificationService(
                     f"**Confidence：{confidence_stars}**",
                     "",
                 ])
+                signal_excerpt = self._decision_signal_excerpt(result, report_language)
+                if signal_excerpt:
+                    report_lines.extend([signal_excerpt, ""])
                 self._append_market_snapshot(report_lines, result)
                 
                 # 核心看点
@@ -1009,6 +1019,72 @@ class NotificationService(
                 return value[len(prefix):]
         return value
 
+    @staticmethod
+    def _phase_decision_list(value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    @classmethod
+    def _phase_decision_has_content(cls, phase_decision: Dict[str, Any]) -> bool:
+        text_keys = (
+            "action_window",
+            "immediate_action",
+            "next_check_time",
+            "confidence_reason",
+        )
+        if any(str(phase_decision.get(key) or "").strip() for key in text_keys):
+            return True
+        return bool(
+            cls._phase_decision_list(phase_decision.get("watch_conditions"))
+            or cls._phase_decision_list(phase_decision.get("data_limitations"))
+        )
+
+    def _append_phase_decision_block(
+        self,
+        report_lines: List[str],
+        dashboard: Dict[str, Any],
+        labels: Dict[str, str],
+    ) -> None:
+        phase_decision = dashboard.get("phase_decision") if dashboard else None
+        if not isinstance(phase_decision, dict):
+            return
+        if not self._phase_decision_has_content(phase_decision):
+            return
+
+        watch_conditions = self._phase_decision_list(phase_decision.get("watch_conditions"))
+        data_limitations = self._phase_decision_list(phase_decision.get("data_limitations"))
+
+        report_lines.extend([
+            f"### 🛡️ {labels['phase_decision_heading']}",
+            "",
+            f"| {labels['action_window_label']} | {labels['immediate_action_label']} | {labels['next_check_time_label']} |",
+            "|---------|---------|---------|",
+            f"| {phase_decision.get('action_window') or 'N/A'} | "
+            f"{phase_decision.get('immediate_action') or 'N/A'} | "
+            f"{phase_decision.get('next_check_time') or 'N/A'} |",
+            "",
+        ])
+
+        if watch_conditions:
+            report_lines.append(f"**{labels['watch_conditions_label']}**:")
+            for condition in watch_conditions:
+                report_lines.append(f"- {condition}")
+            report_lines.append("")
+
+        confidence_reason = str(phase_decision.get("confidence_reason") or "").strip()
+        if confidence_reason:
+            report_lines.extend([
+                f"**{labels['confidence_reason_label']}**: {confidence_reason}",
+                "",
+            ])
+
+        if data_limitations:
+            report_lines.append(f"**{labels['data_limitations_label']}**:")
+            for limitation in data_limitations:
+                report_lines.append(f"- {limitation}")
+            report_lines.append("")
+
     def _get_signal_level(self, result: AnalysisResult) -> tuple:
         """Get localized signal level and color based on operation advice."""
         return get_signal_level(
@@ -1111,6 +1187,9 @@ class NotificationService(
                     f"## {signal_emoji} {stock_name} ({result.code})",
                     "",
                 ])
+                signal_excerpt = self._decision_signal_excerpt(result, report_language)
+                if signal_excerpt:
+                    report_lines.extend([signal_excerpt, ""])
                 
                 # ========== 舆情与基本面概览（放在最前面）==========
                 intel = dashboard.get('intelligence', {}) if dashboard else {}
@@ -1242,6 +1321,8 @@ class NotificationService(
                                 f"**{labels['chip_label']}**: {chip_unavailable_reason}",
                                 "",
                             ])
+
+                self._append_phase_decision_block(report_lines, dashboard, labels)
                 
                 # ========== 作战计划 ==========
                 battle = dashboard.get('battle_plan', {}) if dashboard else {}
@@ -1413,6 +1494,10 @@ class NotificationService(
                 one_sentence = core.get('one_sentence', result.analysis_summary) if core else result.analysis_summary
                 if one_sentence:
                     lines.append(f"📌 **{one_sentence[:80]}**")
+                    lines.append("")
+                signal_excerpt = self._decision_signal_excerpt(result, report_language)
+                if signal_excerpt:
+                    lines.append(signal_excerpt)
                     lines.append("")
                 
                 # 重要信息区（舆情+基本面）
@@ -1672,6 +1757,10 @@ class NotificationService(
         excerpt = self._public_phase_pack_excerpt(result, report_language)
         if excerpt:
             lines.extend([excerpt, ""])
+
+        signal_excerpt = self._decision_signal_excerpt(result, report_language)
+        if signal_excerpt:
+            lines.extend([signal_excerpt, ""])
 
         self._append_market_snapshot(lines, result)
         
